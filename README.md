@@ -34,4 +34,4 @@ TM_MAX_DEPTH=1
 TM_EXTRA=("$HOME/.dotfiles")
 ```
 
-Defaults match the original script: every directory exactly two levels below `~`.
+By default, tm lists every directory exactly two levels below `~`.
