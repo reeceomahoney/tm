@@ -1,7 +1,7 @@
 -- Colorscheme. On Omarchy, follow the system theme; everywhere else use tokyonight.
-local omarchy = vim.fn.expand("~/.config/omarchy/current/theme/neovim.lua")
-if vim.fn.filereadable(omarchy) == 1 then
-  return dofile(omarchy)
+local omarchy_theme = vim.fn.expand("~/.local/state/omarchy/current/theme/neovim.lua")
+if vim.fn.filereadable(omarchy_theme) == 1 then
+  return dofile(omarchy_theme)
 end
 
 return {
