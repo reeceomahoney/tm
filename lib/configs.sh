@@ -44,7 +44,10 @@ install_configs() {
 
     if has nvim; then
         info "Installing neovim plugins (lazy-lock.json)"
+        # Twice: if lazy.nvim itself moves, the first pass only restores lazy.nvim
+        # and then rewrites the lockfile from the stale plugin checkouts.
         NVIM_APPNAME=$appname nvim --headless "+Lazy! restore" +qa >/dev/null 2>&1 &&
+            NVIM_APPNAME=$appname nvim --headless "+Lazy! restore" +qa >/dev/null 2>&1 &&
             ok "plugins restored" ||
             warn "plugin restore failed; open nvim and run :Lazy restore"
     fi
