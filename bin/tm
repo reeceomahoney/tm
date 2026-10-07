@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# tm: tmux session picker, plus setup for the tmux/neovim environment it lives in.
+
+set -uo pipefail
+
+# Resolve the repo root through any symlinks (macOS lacks `readlink -f` on older versions).
+src=${BASH_SOURCE[0]}
+while [[ -L $src ]]; do
+    dir=$(cd -P "$(dirname "$src")" && pwd)
+    src=$(readlink "$src")
+    [[ $src != /* ]] && src=$dir/$src
+done
+TM_HOME=$(cd -P "$(dirname "$src")/.." && pwd)
+unset src dir
+
+source "$TM_HOME/lib/common.sh"
+source "$TM_HOME/lib/platform.sh"
+source "$TM_HOME/lib/deps.sh"
+source "$TM_HOME/lib/configs.sh"
+
+# User config: plain bash, e.g. TM_ROOTS=("$HOME/work" "$HOME/code"); TM_EXTRA=("$HOME/.dotfiles")
+TM_ROOTS=("$HOME")
+TM_MIN_DEPTH=2
+TM_MAX_DEPTH=2
+TM_EXTRA=()
+[[ -f $XDG_CONFIG_HOME/tm/config.sh ]] && source "$XDG_CONFIG_HOME/tm/config.sh"
+
+usage() {
+    cat <<EOF
+tm - tmux sessionizer
+
+usage:
+  tm                 pick a project directory or session with fzf
+  tm <dir>           open <dir> as a tmux session
+  tm setup [opts]    install dependencies and link configs
+                       --no-deps      skip installing tools
+                       --no-configs   skip linking tmux/nvim configs
+                       --isolated     link nvim config as NVIM_APPNAME=tm-nvim
+                       --yes          answer yes to prompts
+  tm update          pull the latest tm and re-run setup
+  tm doctor          show tool versions and config status
+  tm uninstall       remove config links and restore backups
+  tm version
+
+config: $XDG_CONFIG_HOME/tm/config.sh
+EOF
+}
+
+# ---------------------------------------------------------------- sessions
+
+session_name() {
+    basename "$1" | tr '.:' '__'
+}
+
+open_session() {
+    local name=$1 dir=$2
+    if ! tmux has-session -t "=$name" 2>/dev/null; then
+        tmux new-session -ds "$name" -c "$dir" || exit 1
+    fi
+    if [[ -n ${TMUX:-} ]]; then
+        tmux switch-client -t "=$name"
+    else
+        tmux attach-session -t "=$name"
+    fi
+}
+
+list_dirs() {
+    local root
+    for root in "${TM_ROOTS[@]}"; do
+        root=${root%/}
+        [[ -d $root ]] || continue
+        # Prune hidden dirs below the root, then keep only entries within the depth range.
+        find "$root" -mindepth 1 -maxdepth "$TM_MAX_DEPTH" -name '.*' -prune -o -type d -print 2>/dev/null |
+            awk -v n=${#root} -v min="$TM_MIN_DEPTH" '{ rel = substr($0, n + 2); if (gsub("/", "/", rel) + 1 >= min) print }'
+    done
+    for root in "${TM_EXTRA[@]+"${TM_EXTRA[@]}"}"; do
+        [[ -d $root ]] && echo "${root%/}"
+    done
+}
+
+pick() {
+    has fzf || die "fzf not found; run: tm setup"
+    has tmux || die "tmux not found; run: tm setup"
+
+    local selected
+    selected=$(
+        {
+            tmux list-sessions -F '● #S' 2>/dev/null
+            list_dirs | sed "s|^$HOME|~|"
+        } | fzf --prompt 'tm> ' --height 40% --reverse
+    ) || exit 0
+    [[ -z $selected ]] && exit 0
+
+    if [[ $selected == '● '* ]]; then
+        local name=${selected#● }
+        if [[ -n ${TMUX:-} ]]; then
+            tmux switch-client -t "=$name"
+        else
+            tmux attach-session -t "=$name"
+        fi
+        return
+    fi
+
+    selected=${selected/#\~/$HOME}
+    open_session "$(session_name "$selected")" "$selected"
+}
+
+open_dir() {
+    has tmux || die "tmux not found; run: tm setup"
+    local dir
+    dir=$(cd "$1" 2>/dev/null && pwd) || die "not a directory: $1"
+    open_session "$(session_name "$dir")" "$dir"
+}
+
+# ---------------------------------------------------------------- management
+
+cmd_setup() {
+    local deps=1 configs=1
+    while (($#)); do
+        case $1 in
+            --no-deps)    deps=0 ;;
+            --no-configs) configs=0 ;;
+            --isolated)   export TM_ISOLATED=1 ;;
+            -y | --yes)   export TM_YES=1 ;;
+            *)            die "unknown option: $1" ;;
+        esac
+        shift
+    done
+
+    detect_platform
+    mkdir -p "$TM_BIN_DIR"
+    ln -sf "$TM_HOME/bin/tm" "$TM_BIN_DIR/tm"
+
+    ((deps)) && install_deps
+    ((configs)) && install_configs
+
+    info "Done"
+    case ":$PATH:" in
+        *":$TM_BIN_DIR:"*) ;;
+        *) warn "$TM_BIN_DIR is not on your PATH; add this to your shell rc:"
+           echo "      export PATH=\"$TM_BIN_DIR:\$PATH\"" ;;
+    esac
+}
+
+cmd_update() {
+    if [[ ! -d $TM_HOME/.git ]]; then
+        warn "$TM_HOME is not a git checkout; skipping pull"
+    elif ! git -C "$TM_HOME" symbolic-ref -q HEAD >/dev/null; then
+        warn "$TM_HOME is pinned to $(cmd_version); skipping pull"
+    else
+        info "Updating $TM_HOME"
+        git -C "$TM_HOME" pull --ff-only || die "update failed (local changes?)"
+    fi
+    exec "$TM_HOME/bin/tm" setup "$@"
+}
+
+cmd_doctor() {
+    detect_platform
+    info "Platform: $TM_OS/$TM_ARCH, package manager: ${TM_PM:-none}"
+    info "tm: $TM_HOME ($(cmd_version))"
+
+    info "Tools"
+    local entry tool min version
+    for entry in $TM_TOOLS; do
+        tool=${entry%%:*} min=${entry#*:}
+        if ! has "$tool"; then
+            warn "$tool: missing"
+            continue
+        fi
+        version=$(tool_version "$tool")
+        if tool_ok "$tool"; then
+            ok "$tool ${version:-?} ${_c_dim}$(command -v "$tool")${_c_reset}"
+        else
+            warn "$tool ${version:-?} (need >= $min) $(command -v "$tool")"
+        fi
+    done
+
+    info "Configs"
+    local dest
+    for dest in $(tm_config_dests); do
+        if [[ -L $dest && $(readlink "$dest") == "$TM_HOME"/* ]]; then
+            ok "$dest -> $(readlink "$dest")"
+        elif [[ $dest != */tm-nvim ]]; then
+            warn "$dest is not managed by tm"
+        fi
+    done
+}
+
+cmd_uninstall() {
+    info "Removing config links"
+    uninstall_configs
+
+    info "Removing binaries"
+    local bin
+    for bin in "$TM_BIN_DIR"/*; do
+        [[ -L $bin ]] || continue
+        case $(readlink "$bin") in
+            "$TM_OPT_DIR"/* | "$TM_HOME"/* | */fdfind) rm "$bin" && ok "removed $bin" ;;
+        esac
+    done
+    rm -rf "$TM_OPT_DIR"
+
+    if [[ $TM_HOME == "$HOME/.local/share/tm" ]]; then
+        rm -rf "$TM_HOME"
+        ok "removed $TM_HOME"
+    fi
+    info "Done. Packages installed via brew/apt/dnf/pacman were left in place."
+}
+
+cmd_version() {
+    git -C "$TM_HOME" describe --tags --always --dirty 2>/dev/null || echo unknown
+}
+
+# ---------------------------------------------------------------- main
+
+case ${1:-} in
+    "")                pick ;;
+    setup)             shift; cmd_setup "$@" ;;
+    update)            shift; cmd_update "$@" ;;
+    doctor)            cmd_doctor ;;
+    uninstall)         cmd_uninstall ;;
+    version | --version) cmd_version ;;
+    -h | --help | help)  usage ;;
+    *)                 open_dir "$1" ;;
+esac
