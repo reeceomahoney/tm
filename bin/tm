@@ -127,6 +127,9 @@ cmd_setup() {
         shift
     done
 
+    # install_deps puts TM_BIN_DIR on this process's PATH; check the caller's.
+    local user_path=$PATH
+
     detect_platform
     mkdir -p "$TM_BIN_DIR"
     ln -sf "$TM_HOME/bin/tm" "$TM_BIN_DIR/tm"
@@ -134,10 +137,12 @@ cmd_setup() {
     ((deps)) && install_deps
     ((configs)) && install_configs
 
+    install_path
+
     info "Done"
-    case ":$PATH:" in
+    case ":$user_path:" in
         *":$TM_BIN_DIR:"*) ;;
-        *) warn "$TM_BIN_DIR is not on your PATH; add this to your shell rc:"
+        *) warn "$TM_BIN_DIR is not on this shell's PATH yet; open a new shell or run:"
            echo "      export PATH=\"$TM_BIN_DIR:\$PATH\"" ;;
     esac
 }
@@ -189,6 +194,7 @@ cmd_doctor() {
 cmd_uninstall() {
     info "Removing config links"
     uninstall_configs
+    uninstall_path
 
     info "Removing binaries"
     local bin

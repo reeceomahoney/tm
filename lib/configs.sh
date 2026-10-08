@@ -1,4 +1,5 @@
-# Link the bundled tmux and nvim configs into ~/.config, backing up whatever was there.
+# Link the bundled tmux and nvim configs into ~/.config, backing up whatever was there,
+# and put TM_BIN_DIR on PATH in the shell rc.
 
 # Destinations tm may own, for doctor/uninstall.
 tm_config_dests() {
@@ -70,4 +71,44 @@ uninstall_configs() {
             ok "restored $backup"
         fi
     done
+}
+
+# Shell rc file to put TM_BIN_DIR on PATH from, or empty for unsupported shells.
+path_rc() {
+    case ${SHELL##*/} in
+        zsh)  echo "${ZDOTDIR:-$HOME}/.zshrc" ;;
+        bash) [[ $(uname -s) == Darwin ]] && echo "$HOME/.bash_profile" || echo "$HOME/.bashrc" ;;
+    esac
+}
+
+# Add a marked block to the shell rc that puts TM_BIN_DIR on PATH.
+install_path() {
+    local rc
+    rc=$(path_rc)
+    if [[ -z $rc ]]; then
+        warn "unsupported shell ${SHELL:-?}; add $TM_BIN_DIR to your PATH manually"
+        return
+    fi
+    if grep -qs '^# >>> tm >>>$' "$rc"; then
+        ok "$rc puts $TM_BIN_DIR on PATH"
+        return
+    fi
+    cat >>"$rc" <<RC
+
+# >>> tm >>>
+case ":\$PATH:" in *":$TM_BIN_DIR:"*) ;; *) export PATH="$TM_BIN_DIR:\$PATH" ;; esac
+# <<< tm <<<
+RC
+    ok "added $TM_BIN_DIR to PATH in $rc"
+}
+
+# Remove the PATH block from the shell rc. Writes through symlinks (e.g. dotfile repos).
+uninstall_path() {
+    local rc tmp
+    rc=$(path_rc)
+    [[ -n $rc ]] && grep -qs '^# >>> tm >>>$' "$rc" || return 0
+    tmp=$(mktemp "${TMPDIR:-/tmp}/tm.XXXXXX")
+    awk '/^# >>> tm >>>$/ { skip = 1 } !skip { print } /^# <<< tm <<<$/ { skip = 0 }' "$rc" >"$tmp" &&
+        cat "$tmp" >"$rc" && ok "removed PATH entry from $rc"
+    rm -f "$tmp"
 }
